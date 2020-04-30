@@ -31,11 +31,27 @@
  *
  *******************************************************************************/
 
+/*
+ *  MAX6675 Module   ==>   Arduino
+ *    CS             ==>     D10
+ *    SO             ==>     D12
+ *    SCK            ==>     D13
+ *    Vcc            ==>     Vcc (5v OK)
+ *    Gnd            ==>     Gnd
+ * */
+
 #include <lmic.h>
 #include <hal/hal.h>
 #include <SPI.h>
-#include <SoftwareSerial.h>
-#include <TinyGPS++.h>
+//#include <SoftwareSerial.h>
+
+#include <SPI.h>
+
+#define MAX6675_CS   10
+#define MAX6675_SO   12
+#define MAX6675_SCK  13
+
+uint8_t coords[12];
 
 // This EUI must be in little-endian format, so least-significant-byte
 // first. When copying an EUI from ttnctl output, this means to reverse
@@ -55,11 +71,6 @@ void os_getDevEui(u1_t *buf) { memcpy_P(buf, DEVEUI, 8); }
 static const u1_t PROGMEM APPKEY[16] = {0x9E, 0x1B, 0xAD, 0xA4, 0x64, 0x94, 0x14, 0x54, 0x49, 0x07, 0x07, 0xF6, 0x50, 0x41, 0x3D, 0xE7};
 void os_getDevKey(u1_t *buf) { memcpy_P(buf, APPKEY, 16); }
 
-uint8_t coords[12];
-uint32_t LatitudeBinary, LongitudeBinary;
-uint16_t altitudeGps;
-uint8_t hdopGps;
-
 //static uint8_t mydata[] = "Hello, world!";
 static osjob_t sendjob;
 
@@ -75,54 +86,44 @@ const lmic_pinmap lmic_pins = {
     .dio = {2, 3, 4},
 };
 
-// GPS NEO-6M
-static const int RXPin = 8, TXPin = 7;
-static const uint32_t GPSBaud = 9600;
+double readThermocouple() {
 
-// The TinyGPS++ object
-TinyGPSPlus gps;
+  uint16_t v;
+  pinMode(MAX6675_CS, OUTPUT);
+  pinMode(MAX6675_SO, INPUT);
+  pinMode(MAX6675_SCK, OUTPUT);
+  
+  digitalWrite(MAX6675_CS, LOW);
+  delay(1);
 
-// The serial connection to the GPS device
-SoftwareSerial gpsSerial(RXPin, TXPin);
+  // Read in 16 bits,
+  //  15    = 0 always
+  //  14..2 = 0.25 degree counts MSB First
+  //  2     = 1 if thermocouple is open circuit  
+  //  1..0  = uninteresting status
+  
+  v = shiftIn(MAX6675_SO, MAX6675_SCK, MSBFIRST);
+  v <<= 8;
+  v |= shiftIn(MAX6675_SO, MAX6675_SCK, MSBFIRST);
+  
+  digitalWrite(MAX6675_CS, HIGH);
+  if (v & 0x4) 
+  {    
+    // Bit 2 indicates if the thermocouple is disconnected
+    return NAN;     
+  }
 
-void get_coords()
+  // The lower three bits (0,1,2) are discarded status bits
+  v >>= 3;
+
+  // The remaining bits are the number of 0.25 degree (C) counts
+  return v*0.25;
+}
+
+void get_temp()
 {
-
-    // For one second we parse GPS data and report some key values
-    for (unsigned long start = millis(); millis() - start < 1000;)
-    {
-        while (gpsSerial.available())
-        {
-            char c = gpsSerial.read();
-            //Serial.write(c); // uncomment this line if you want to see the GPS data flowing
-            gps.encode(c);
-        }
-    }
-
-    if (gps.location.isValid())
-    {
-
-        LatitudeBinary = ((gps.location.lat() + 90) / 180.0) * 16777215;
-        LongitudeBinary = ((gps.location.lng() + 180) / 360.0) * 16777215;
-
-        coords[0] = (LatitudeBinary >> 16) & 0xFF;
-        coords[1] = (LatitudeBinary >> 8) & 0xFF;
-        coords[2] = LatitudeBinary & 0xFF;
-
-        coords[3] = (LongitudeBinary >> 16) & 0xFF;
-        coords[4] = (LongitudeBinary >> 8) & 0xFF;
-        coords[5] = LongitudeBinary & 0xFF;
-
-        altitudeGps = gps.altitude.meters();
-        coords[6] = (altitudeGps >> 8) & 0xFF;
-        coords[7] = altitudeGps & 0xFF;
-
-        hdopGps = gps.hdop.value() / 10;
-        coords[8] = hdopGps & 0xFF;
-        coords[9] = gps.time.hour();
-        coords[10] = gps.time.minute();
-        coords[11] = gps.time.second();
-    }
+  Serial.print(readThermocouple());
+  Serial.println('c');
 }
 
 void do_send(osjob_t *j)
@@ -135,7 +136,9 @@ void do_send(osjob_t *j)
     else
     {
         // Prepare upstream data transmission at the next possible time.
-        get_coords();
+        get_temp();
+        //get_coords();
+        //LMIC_setTxData2(1, (uint8_t *)coords, sizeof(coords), 0);
         LMIC_setTxData2(1, (uint8_t *)coords, sizeof(coords), 0);
         Serial.println(F("Packet queued"));
     }
@@ -235,12 +238,8 @@ void setup()
     Serial.begin(115200);
     Serial.println(F("Starting"));
 
-    gpsSerial.begin(9600);
     delay(5000);
-    gpsSerial.print("$PMTK301,2*2E\r\n"); // Select SBAS as DGPS source (RTCM)
-    gpsSerial.print("$PMTK313,1*2E\r\n"); // Enable to search a SBAS satellite
-    //gpsSerial.print("$PMTK513,1*28\r\n");
-
+    
 #ifdef VCC_ENABLE
         // For Pinoccio Scout boards
     pinMode(VCC_ENABLE, OUTPUT);
