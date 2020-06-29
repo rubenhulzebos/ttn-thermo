@@ -43,7 +43,14 @@
 #include <lmic.h>
 #include <hal/hal.h>
 #include <SPI.h>
-#include <OneWire.h>
+
+// LowPower library from RocketScream
+// https://github.com/rocketscream/Low-Power
+#include "LowPower.h"
+
+#define statusLED 7
+
+/*#include <OneWire.h>
 #include <DallasTemperature.h>
 
 // Data wire is plugged into port 2 on the Arduino
@@ -59,10 +66,13 @@ DallasTemperature sensors(&oneWire);
 
 // arrays to hold device addresses
 DeviceAddress DS1820addr;
+*/
 
 #define MAX6675_CS   10
 #define MAX6675_SO   9
 #define MAX6675_SCK  8
+#define MAX6675_PWR  A0
+#define MAX6675_GND  A1
 
 //uint8_t coords[12];
 uint8_t temperatureData[2];
@@ -90,7 +100,7 @@ static osjob_t sendjob;
 
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
-const unsigned TX_INTERVAL = 30;
+unsigned int TX_INTERVAL = 30;
 
 // Pin mapping RFM95
 const lmic_pinmap lmic_pins = {
@@ -100,8 +110,19 @@ const lmic_pinmap lmic_pins = {
     .dio = {2, 3, 4},
 };
 
-double readThermocouple() {
+// Variables will change:
+int ledState = LOW;             // ledState used to set the LED
 
+// Generally, you should use "unsigned long" for variables that hold time
+// The value will quickly become too large for an int to store
+unsigned long previousMillis = 0;        // will store last time LED was updated
+
+// constants won't change:
+//const long interval = 1000;           // interval at which to blink (milliseconds)
+unsigned long interval = 500;           // interval at which to blink (milliseconds)
+int blinkCounter = 99;
+
+double readThermocouple() {
   uint16_t v;
   pinMode(MAX6675_CS, OUTPUT);
   pinMode(MAX6675_SO, INPUT);
@@ -124,7 +145,7 @@ double readThermocouple() {
   if (v & 0x4) 
   {    
     // Bit 2 indicates if the thermocouple is disconnected
-    return NAN;     
+    return NAN;
   }
 
   // The lower three bits (0,1,2) are discarded status bits
@@ -133,7 +154,7 @@ double readThermocouple() {
   // The remaining bits are the number of 0.25 degree (C) counts
   return v*0.25;
 }
-
+/*
 // function to print a device address
 void printDS1820Address(DeviceAddress deviceAddress)
 {
@@ -163,17 +184,49 @@ void powerOffDS1820(void)
   digitalWrite(DS1820vcc, LOW);
   digitalWrite(DS1820gnd, LOW);
 }
+*/
 
-void get_temp()
-{
-  uint16_t thermodata = readThermocouple();
-  Serial.print(thermodata);
-  Serial.println('c');
-
-  temperatureData[0] = (uint8_t)thermodata;
-  temperatureData[1] = (uint8_t)(thermodata >> 8);
+void powerOnMAX6675() {
+    digitalWrite(MAX6675_PWR, HIGH);
+    digitalWrite(MAX6675_GND, LOW);
+    digitalWrite(MAX6675_CS, HIGH);
+    Serial.println(F("Power ON MAX6675"));
+}
+void powerOffMAX6675() {
+    digitalWrite(MAX6675_PWR, LOW);
+    digitalWrite(MAX6675_GND, LOW);
+    digitalWrite(MAX6675_CS, LOW);
+    Serial.println(F("Power OFF MAX6675"));
 }
 
+void getTemp() {
+  powerOnMAX6675();
+  delay(500);
+  float tempC = readThermocouple();
+  powerOffMAX6675();
+  Serial.print("Temp C: ");
+  Serial.println(tempC);
+
+  tempC = tempC * 100;
+
+  // Below 50 degrees, the interval is 15 minutes, above 50 degrees interval is 1 minute
+  if (tempC <= 5000) {
+      TX_INTERVAL = 900;
+  } else {
+      TX_INTERVAL = 60;
+  }
+  
+
+  uint16_t tempC16;
+  tempC16 = (uint16_t)tempC;
+  
+  //Serial.print("tempC16: ");
+  //Serial.println(tempC16);
+
+  temperatureData[0] = (uint8_t)tempC16;
+  temperatureData[1] = (uint8_t)(tempC16 >> 8);
+}
+/*
 void get_tempDS1820()
 {
   Serial.print("Requesting temperatures...");
@@ -181,7 +234,10 @@ void get_tempDS1820()
   sensors.requestTemperatures();
   Serial.println("DONE");
 
- 
+ //Temp C: 25.62
+ //tempC16: 2562
+ //Byte 0: 2
+ //Byte 1: A
 
   float tempC = sensors.getTempC(DS1820addr);
   Serial.print("Temp C: ");
@@ -205,6 +261,11 @@ void get_tempDS1820()
   Serial.println(temperatureData[1], HEX);
 
   powerOffDS1820();
+}*/
+
+void BlinkFast() {
+    interval = 100;
+    blinkCounter = 20;
 }
 
 void do_send(osjob_t *j)
@@ -217,10 +278,7 @@ void do_send(osjob_t *j)
     else
     {
         // Prepare upstream data transmission at the next possible time.
-        //get_temp();
-        get_tempDS1820();
-        //get_coords();
-        //LMIC_setTxData2(1, (uint8_t *)coords, sizeof(coords), 0);
+        getTemp();
         LMIC_setTxData2(1, (uint8_t *)temperatureData, sizeof(temperatureData), 0);
         Serial.println(F("Packet queued"));
     }
@@ -250,6 +308,8 @@ void onEvent(ev_t ev)
         break;
     case EV_JOINED:
         Serial.println(F("EV_JOINED"));
+        // Switch off LED to show it's connected
+        blinkCounter = 0;
 
         // Disable link check validation (automatically enabled
         // during join, but not supported by TTN at this time).
@@ -267,6 +327,7 @@ void onEvent(ev_t ev)
         break;
     case EV_TXCOMPLETE:
         Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+        BlinkFast();
         if (LMIC.txrxFlags & TXRX_ACK)
             Serial.println(F("Received ack"));
         if (LMIC.dataLen)
@@ -291,7 +352,13 @@ void onEvent(ev_t ev)
             Serial.println(F("---- data end ----"));
         }
         // Schedule next transmission
-        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+        //os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+        do_send(&sendjob);
+        for (int i=0; i<int(TX_INTERVAL/8); i++) {
+            // Use library from https://github.com/rocketscream/Low-Power
+            LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+        }
+
         break;
     case EV_LOST_TSYNC:
         Serial.println(F("EV_LOST_TSYNC"));
@@ -317,6 +384,8 @@ void onEvent(ev_t ev)
 
 
 
+
+/*
 void setupDS1820()
 {
   pinMode(DS1820vcc, OUTPUT); 
@@ -340,15 +409,28 @@ void setupDS1820()
   Serial.println();
   powerOffDS1820();
 }
+*/
 
 void setup()
 {
     Serial.begin(115200);
     Serial.println(F("Starting"));
 
-    setupDS1820();
+    pinMode(statusLED, OUTPUT);
+    digitalWrite(statusLED, LOW);
 
-    delay(2000);
+    pinMode(MAX6675_PWR, OUTPUT);
+    pinMode(MAX6675_GND, OUTPUT);
+
+    //setupDS1820();
+
+    //delay(2000);
+    for (int i = 0; i <= 20; i++) {
+        digitalWrite(statusLED, HIGH);
+        delay(50);
+        digitalWrite(statusLED, LOW);
+        delay(50);
+    }
     
 #ifdef VCC_ENABLE
         // For Pinoccio Scout boards
@@ -363,13 +445,40 @@ void setup()
     LMIC_reset();
 
     // Added by Ruben: Problems with downlink and OTAA
-    LMIC_setClockError(MAX_CLOCK_ERROR * 10 / 100);
+    LMIC_setClockError(MAX_CLOCK_ERROR * 20 / 100);
 
     // Start job (sending automatically starts OTAA too)
     do_send(&sendjob);
 }
 
-void loop()
-{
+void blinkLED() {
+    if (interval == 0 || blinkCounter == 0) {
+        ledState = LOW;
+        digitalWrite(statusLED, ledState);
+    } else {
+        unsigned long currentMillis = millis();
+
+        if (currentMillis - previousMillis >= interval) {
+            // save the last time you blinked the LED
+            previousMillis = currentMillis;
+            if (blinkCounter != 99) {
+                blinkCounter--;
+            }
+
+            // if the LED is off turn it on and vice-versa:
+            if (ledState == LOW) {
+                ledState = HIGH;
+            } else {
+                ledState = LOW;
+            }
+
+            // set the LED with the ledState of the variable:
+            digitalWrite(statusLED, ledState);
+        }
+    }
+}
+
+void loop() {
+    blinkLED();
     os_runloop_once();
 }
